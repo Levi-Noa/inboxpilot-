@@ -141,23 +141,26 @@ The agent uses a **ReAct (Reason + Act)** loop. At every step, the LLM reads the
 ## Graph Architecture
 
 ```
-            [orchestrator]
-         LLM reasons over full
-         conversation + tool schemas
-                │
-      ┌─────────┴──────────┐
-  tool call              no tool call
-      │                     │
-[tool_executor]            END
-  runs tool,
-  updates state
-      │
-      ├── multiple search results ──► [select_email] ⏸ user picks a card
-      │
-      └── create_gmail_draft,      ──► [human_review] ⏸ user approves/modifies/rejects
-          not yet approved               ├── approve → execute → END
-                                         ├── modify  → orchestrator
-                                         └── reject  → END
+              [orchestrator]
+           LLM reasons over full
+           conversation + tool schemas
+                    │
+       ┌────────────┼────────────────────┐
+   other tool    create_gmail_draft   no tool call
+   call          (not yet approved)       │
+       │                │                END
+       │           [human_review] ⏸ user approves/modifies/rejects
+       │                ├── approve  → [tool_executor] → orchestrator → END
+       │                ├── modify   → orchestrator
+       │                └── reject   → orchestrator
+       │
+  [tool_executor]
+   runs tool, updates state
+       │
+       ├── search results found ──► [select_email] ⏸ user picks a card
+       │                                  │
+       │                            orchestrator
+       └── otherwise ──────────────► orchestrator
 ```
 
 ### Why this enables true reasoning
