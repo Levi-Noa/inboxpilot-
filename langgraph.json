@@ -1,0 +1,13 @@
+{
+  "graphs": {
+    "agent": {
+      "path": "agent/graph.py:graph",
+      "description": "WalkMe Exercise Agent with Gmail integration and LangSmith tracing"
+    }
+  },
+  "dependencies": [
+    "."
+  ],
+  "env": ".env",
+  "python_version": "3.11"
+}

@@ -1,0 +1,164 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  @apply box-border;
+}
+
+html, body {
+  font-family: 'Manrope', system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+  color: #1f2937;
+  background:
+    radial-gradient(1200px 700px at 8% -10%, rgba(45, 212, 191, 0.18), transparent 55%),
+    radial-gradient(1200px 700px at 92% 5%, rgba(251, 191, 36, 0.18), transparent 50%),
+    radial-gradient(900px 600px at 50% 115%, rgba(59, 130, 246, 0.12), transparent 45%),
+    #eef3f8;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.app-shell {
+  position: relative;
+  min-height: 100vh;
+  isolation: isolate;
+}
+
+.app-shell::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -2;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(148, 163, 184, 0.12) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.12) 1px, transparent 1px);
+  background-size: 38px 38px;
+  mask-image: radial-gradient(circle at 50% 50%, black, transparent 88%);
+}
+
+.panel-glass {
+  background: linear-gradient(165deg, rgba(250, 252, 255, 0.9), rgba(240, 245, 251, 0.84));
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  box-shadow: 0 20px 45px rgba(148, 163, 184, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(8px);
+}
+
+html.theme-dark body {
+  color: #e2e8f0;
+  background:
+    radial-gradient(1000px 600px at 0% 0%, rgba(45, 212, 191, 0.08), transparent 50%),
+    radial-gradient(1000px 600px at 100% 0%, rgba(59, 130, 246, 0.06), transparent 50%),
+    #0f172a;
+}
+
+html.theme-dark .panel-glass {
+  background: linear-gradient(165deg, rgba(30, 41, 59, 0.7), rgba(15, 23, 42, 0.8));
+  border: 1px solid rgba(148, 163, 184, 0.15);
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(12px);
+}
+
+html.theme-dark .text-slate-800,
+html.theme-dark .text-slate-700 {
+  color: #f1f5f9 !important;
+}
+
+html.theme-dark .text-slate-600,
+html.theme-dark .text-slate-500 {
+  color: #cbd5e1 !important;
+}
+
+html.theme-dark .text-slate-400 {
+  color: #94a3b8 !important;
+}
+
+html.theme-dark .bg-white,
+html.theme-dark .bg-white\/55,
+html.theme-dark .bg-white\/80 {
+  background-color: rgba(30, 41, 59, 0.7) !important;
+}
+
+html.theme-dark .border-slate-300,
+html.theme-dark .border-slate-200 {
+  border-color: rgba(148, 163, 184, 0.2) !important;
+}
+
+/* Keep user-authored message bubbles readable in dark mode. */
+html.theme-dark .user-msg-bubble {
+  background: linear-gradient(135deg, #334155, #1e293b) !important;
+  border: 1px solid rgba(45, 212, 191, 0.4) !important;
+  color: #f1f5f9 !important;
+}
+
+html.theme-dark .user-msg-text,
+html.theme-dark .user-msg-bubble {
+  color: #f1f5f9 !important;
+}
+
+.soft-ring {
+  box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.3), 0 0 0 6px rgba(45, 212, 191, 0.12);
+}
+
+.title-font {
+  font-family: 'Space Grotesk', sans-serif;
+}
+
+.fade-up {
+  animation: fadeUp 0.45s ease-out;
+}
+
+.float-in {
+  animation: floatIn 0.7s ease-out;
+}
+
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes floatIn {
+  from {
+    opacity: 0;
+    transform: translateY(30px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: rgba(226, 232, 240, 0.7);
+}
+
+*::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.55);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.72);
+  background-clip: content-box;
+}

@@ -1,0 +1,15 @@
+fastapi>=0.111.0
+uvicorn>=0.29.0
+langgraph>=0.2.0
+langchain>=0.2.0
+langchain-openai>=0.1.0
+langchain-ollama>=0.1.0
+langchain-groq>=0.1.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.2.0
+google-api-python-client>=2.100.0
+python-dotenv>=1.0.0
+langsmith>=0.1.0
+langgraph-checkpoint-sqlite>=0.1.0
+langgraph-cli[inmem]>=0.4.0
+streamlit>=1.32.0

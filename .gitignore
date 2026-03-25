@@ -1,0 +1,37 @@
+# Secrets and credentials
+.env
+credentials.json
+token.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Runtime artifacts
+agent_memory.db
+agent_memory.db-shm
+agent_memory.db-wal
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+logs/*.log
+*.log
+
+# IDE / tool configs
+.claude/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
