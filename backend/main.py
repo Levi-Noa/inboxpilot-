@@ -347,7 +347,7 @@ async def chat(req: ChatRequest):
             att_names = [a.get("filename", "file") for a in pending_atts if a.get("filename")]
             # Prefer the actual args the LLM passed to create_gmail_draft so the
             # review card reflects the real recipient/subject/body, not defaults.
-            tool_args = _extract_draft_tool_args(result.get("messages", []))
+            tool_args = _extract_draft_tool_args(result.get("messages", [])) or {}
             review_data = {
                 "draft": tool_args.get("body") or state.get("draft_reply") or "",
                 "to": tool_args.get("to") or selected.get("from_", ""),
@@ -361,8 +361,9 @@ async def chat(req: ChatRequest):
 
         # ── Build clean ai_response ───────────────────────────────────────────
         if is_human_review_turn:
-            # We set this to empty so the frontend MessageBubble returns null (hidden)
+            # Empty so the frontend shows only the ReviewCard, not a text bubble
             ai_response = ""
+            interrupt_question = None  # Don't leak [DRAFT PREVIEW] into content field
         else:
             # Get raw LLM output
             raw_ai = _last_ai_content(result.get("messages", []))
@@ -429,6 +430,8 @@ async def chat(req: ChatRequest):
         }
 
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return {
             "response": f"Error: {str(e)}",
             "error": True,

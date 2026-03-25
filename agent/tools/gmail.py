@@ -708,7 +708,7 @@ def _strip_html(html: str) -> str:
 def _decode_body(payload: dict) -> str:
     """Recursively extract and decode plain-text body, prioritizing text/plain."""
     mime_type = payload.get("mimeType", "")
-    body_data = payload.get("body", {}).get("data", "")
+    body_data = (payload.get("body") or {}).get("data", "")
 
     # Priority 1: Direct text/plain
     if mime_type == "text/plain" and body_data:
@@ -1046,15 +1046,10 @@ def create_gmail_draft(thread_id: str, to: str, subject: str, body: str, config:
     recipient_addr = _extract_email_address(to)
     can_send = (not dry_run) and bool(allowed) and (recipient_addr in allowed)
 
-    # Safety gate: never send to disallowed addresses
-    if not dry_run and allowed and recipient_addr not in allowed:
-        return {
-            "success": False,
-            "error": (
-                f"Sending blocked: '{recipient_addr}' is not in the allowed send list. "
-                "The reply has NOT been saved or sent. Please verify the recipient."
-            ),
-        }
+    # Safety gate: if recipient not in allowlist, save as draft and inform user
+    _blocked_send = not dry_run and allowed and recipient_addr not in allowed
+    if _blocked_send:
+        dry_run = True  # Fall through to save-as-draft path; message will explain
 
     try:
         t_total = time.perf_counter()
@@ -1100,10 +1095,15 @@ def create_gmail_draft(thread_id: str, to: str, subject: str, body: str, config:
             )
             draft_id = draft.get("id", "")
             _log_timing("create_gmail_draft_total", time.perf_counter() - t_total)
+            saved_msg = (
+                f"✅ Draft saved to Gmail Drafts (sending to '{recipient_addr}' is blocked — not in allowed list)."
+                if _blocked_send else
+                f"✅ Draft saved to Gmail Drafts{f' with {attachment_count} attachment(s)' if attachment_count else ''}! Open Gmail to review and send."
+            )
             return {
                 "success": True,
                 "draft_id": draft_id,
-                "message": f"✅ Draft saved to Gmail Drafts{f' with {attachment_count} attachment(s)' if attachment_count else ''}! Open Gmail to review and send.",
+                "message": saved_msg,
                 "action": "draft",
                 "attachment_count": attachment_count,
             }
