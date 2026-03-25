@@ -189,6 +189,14 @@ def route_after_orchestrator(state: AgentState) -> str:
         return END
     for tc in last.tool_calls:
         if tc["name"] == SEND_TOOL_NAME:
+            # If create_gmail_draft was already executed in this turn (ToolMessage exists),
+            # the LLM is trying to call it again — block the loop.
+            already_executed = any(
+                isinstance(m, ToolMessage) and getattr(m, "name", "") == SEND_TOOL_NAME
+                for m in state.get("messages", [])[-6:]
+            )
+            if already_executed:
+                return END
             last_human = _last_human_message_text(state)
             user_approved = _is_approval(last_human)
             if not state.get("review_granted", False) and not user_approved:
