@@ -2,10 +2,6 @@ from dotenv import load_dotenv
 import os
 load_dotenv()
 
-key = os.environ.get("OPENAI_API_KEY", "")
-print(f"DEBUG: App starting. Key exists: {bool(key)} Len: {len(key)} Suffix: {key[-4:] if key else 'N/A'}", flush=True)
-print(f"DEBUG: CWD: {os.getcwd()}", flush=True)
-
 try:
     from backend import config  # type: ignore
 except Exception:
@@ -93,16 +89,6 @@ def _extract_draft_tool_args(messages) -> dict | None:
                     return tc.get("args", {})
     return None
 
-
-_SEND_INTENT_WORDS = [
-    "send", "sent", "שלח", "תשלח", "שלח את זה", "תשלח את זה", "send it", "go ahead",
-    "send now", "שלח עכשיו", "send the email", "שלח את המייל", "ok send", "yes send",
-    "Yes", "yes", "approve", "כן", "אשר", "want to send", "want to sent",
-]
-
-def _is_send_intent(text: str) -> bool:
-    t = text.strip().lower()
-    return any(w.lower() in t for w in _SEND_INTENT_WORDS)
 
 def _is_numerical_selection(text: str) -> bool:
     """True if message is just a number like '1', '2', etc."""

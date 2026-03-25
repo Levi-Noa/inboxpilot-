@@ -168,8 +168,14 @@ def _last_human_message_text(state: AgentState) -> str:
     return ""
 
 
-_APPROVAL_TEXTS = {"yes", "y", "ok", "okay", "approve", "approved", "go ahead", "send it", "save"}
-_APPROVAL_PATTERN = re.compile(r'\b(' + '|'.join([re.escape(x) for x in _APPROVAL_TEXTS]) + r')\b', re.IGNORECASE)
+# Exact short-form approval phrases — must be the *entire* message (stripped).
+# Using full-message match prevents "ok so can you change the subject?" from bypassing review.
+_APPROVAL_EXACT = {"yes", "y", "ok", "okay", "approve", "approved", "go ahead", "send it", "send", "save", "כן", "אשר", "שלח"}
+
+def _is_approval(text: str) -> bool:
+    """True only when the entire (stripped, lowercased) message is an approval phrase."""
+    return text.strip().lower() in _APPROVAL_EXACT
+
 
 def route_after_orchestrator(state: AgentState) -> str:
     """
@@ -184,7 +190,7 @@ def route_after_orchestrator(state: AgentState) -> str:
     for tc in last.tool_calls:
         if tc["name"] == SEND_TOOL_NAME:
             last_human = _last_human_message_text(state)
-            user_approved = bool(_APPROVAL_PATTERN.search(last_human))
+            user_approved = _is_approval(last_human)
             if not state.get("review_granted", False) and not user_approved:
                 return "human_review"
             return "tools"
@@ -192,7 +198,7 @@ def route_after_orchestrator(state: AgentState) -> str:
         # Do NOT block if the last human message was a revision request (not a simple approval).
         if tc["name"] == "draft_reply" and state.get("draft_attempts", 0) >= 1:
             last_human = _last_human_message_text(state)
-            user_is_revising = last_human and not bool(_APPROVAL_PATTERN.search(last_human))
+            user_is_revising = last_human and not _is_approval(last_human)
             if not user_is_revising:
                 return END
     return "tools"
@@ -201,18 +207,7 @@ def route_after_orchestrator(state: AgentState) -> str:
 def route_after_human_review(state: AgentState) -> str:
     """After human review, route based on user decision."""
     if state.get("review_granted", False):
-        # User approved — execute create_gmail_draft
         return "tools"
-    
-    # Check if user sent the special _save_draft_ command directly to orchestrator
-    # (if they weren't in human_review interrupt)
-    last_human = _last_human_message_text(state)
-    if "_save_draft_" in last_human:
-        # We need to execute the tool with force_save_draft
-        # But wait, we can't mutate state in a router.
-        # Actually, if it's the orchestrator that intercepts this, we handle it in human_review.
-        pass
-
     # User rejected or gave feedback — back to orchestrator
     return "orchestrator"
 

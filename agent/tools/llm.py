@@ -37,8 +37,7 @@ def _get_llm(model: str = ""):
     from langchain_openai import ChatOpenAI
     _model = model or os.getenv("LLM_MODEL", "gpt-4o")
     api_key = os.getenv("OPENAI_API_KEY") or None
-    print(f"DEBUG: LLM TOOL. Key exists: {bool(api_key)} Len: {len(api_key) if api_key else 0}", flush=True)
-    base_url = os.getenv("OPENAI_BASE_URL") or None
+base_url = os.getenv("OPENAI_BASE_URL") or None
     llm = ChatOpenAI(model=_model, temperature=0.3, base_url=base_url, max_tokens=600, api_key=api_key)
     if not model:
         _llm_instance = llm
@@ -141,7 +140,6 @@ Subject: {email_subject}
         return {"success": False, "error": _safe_error("Failed to generate draft reply.", e)}
 
 
-@tool
 def rank_results(user_query: str, email_results: list[dict]) -> dict:
     """
     Re-rank a list of email search results by relevance to the user's query.
