@@ -84,10 +84,20 @@ def _contains_create_draft_tool(messages) -> bool:
     return False
 
 
+def _extract_draft_tool_args(messages) -> dict | None:
+    """Return the args (to, subject, body) the LLM passed to create_gmail_draft, if present."""
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage):
+            for tc in (getattr(msg, "tool_calls", None) or []):
+                if tc.get("name") == "create_gmail_draft":
+                    return tc.get("args", {})
+    return None
+
+
 _SEND_INTENT_WORDS = [
-    "send", "שלח", "תשלח", "שלח את זה", "תשלח את זה", "send it", "go ahead",
+    "send", "sent", "שלח", "תשלח", "שלח את זה", "תשלח את זה", "send it", "go ahead",
     "send now", "שלח עכשיו", "send the email", "שלח את המייל", "ok send", "yes send",
-    "Yes", "yes", "approve", "כן", "אשר",
+    "Yes", "yes", "approve", "כן", "אשר", "want to send", "want to sent",
 ]
 
 def _is_send_intent(text: str) -> bool:
@@ -228,9 +238,8 @@ async def chat(req: ChatRequest):
                 "messages": [],
                 "search_results": [],
                 "waiting_for_interrupt": False,
-                "last_email_card_id": None,   # for dedup email cards
-                "last_draft": None,           # for re-send after save
-                "recipient_override": None,   # optional recipient override from user instruction
+                "last_email_card_id": None,
+                "recipient_override": None,
                 "selected_email": None,
             }
 
@@ -244,10 +253,9 @@ async def chat(req: ChatRequest):
 
         config = {"configurable": {"thread_id": req.thread_id}}
 
-        # Ensure legacy keys present
+        # Ensure keys present for older in-memory threads
         threads[req.thread_id].setdefault("waiting_for_interrupt", False)
         threads[req.thread_id].setdefault("last_email_card_id", None)
-        threads[req.thread_id].setdefault("last_draft", None)
         threads[req.thread_id].setdefault("recipient_override", None)
         threads[req.thread_id].setdefault("selected_email", None)
 
@@ -256,29 +264,8 @@ async def chat(req: ChatRequest):
         if override_to:
             threads[req.thread_id]["recipient_override"] = override_to
 
-        # ── Re-send after draft saved ─────────────────────────────────────────
-        # If interrupt is NOT active but user expressed send intent and we have
-        # a cached draft from a previous Save Draft action → send it directly.
-        last_draft = threads[req.thread_id].get("last_draft")
-        waiting = threads[req.thread_id].get("waiting_for_interrupt", False)
-        if last_draft and not waiting and _is_send_intent(req.message) and not attachments_payload:
-            # Inject draft state back into graph and invoke with 'yes'
-            prior_msgs = [
-                m for m in threads[req.thread_id]["messages"]
-                if isinstance(m, tuple)
-            ]
-            graph_input = {
-                "messages": prior_msgs + [("human", "yes")],
-                "selected_email": last_draft["selected_email"],
-                "draft_reply": last_draft["draft_reply"],
-                "review_granted": True,
-                "force_save_draft": False,
-            }
-            if threads[req.thread_id].get("recipient_override") and graph_input.get("selected_email"):
-                graph_input["selected_email"]["from_"] = threads[req.thread_id]["recipient_override"]
-            result = graph.invoke(graph_input, config)
-            threads[req.thread_id]["last_draft"] = None  # consumed
-        elif threads[req.thread_id].get("waiting_for_interrupt"):
+        # ── Route: resume interrupt or start new turn ─────────────────────────
+        if threads[req.thread_id].get("waiting_for_interrupt"):
             threads[req.thread_id]["waiting_for_interrupt"] = False
             update_payload = {}
             selected_for_update = threads[req.thread_id].get("selected_email")
@@ -288,21 +275,17 @@ async def chat(req: ChatRequest):
                 update_payload["selected_email"] = updated_selected
             if "_save_draft_" in user_message:
                 update_payload.update({"force_save_draft": True, "review_granted": True})
-                result = graph.invoke(Command(resume=user_message, update=update_payload), config)
-            else:
-                result = graph.invoke(Command(resume=user_message, update=update_payload), config)
+            result = graph.invoke(Command(resume=user_message, update=update_payload), config)
         else:
             if "_save_draft_" in user_message:
                 graph_input = {
                     "messages": [("human", user_message.replace("_save_draft_", "save as draft please"))],
                     "force_save_draft": True,
-                    "review_granted": True
+                    "review_granted": True,
                 }
             else:
                 threads[req.thread_id]["messages"].append(("human", user_message))
-                graph_input = {
-                    "messages": threads[req.thread_id]["messages"]
-                }
+                graph_input = {"messages": threads[req.thread_id]["messages"]}
 
             selected_for_input = threads[req.thread_id].get("selected_email")
             if selected_for_input:
@@ -329,13 +312,6 @@ async def chat(req: ChatRequest):
                 
                 if interrupt_question:
                     threads[req.thread_id]["waiting_for_interrupt"] = True
-                    # ── CACHE DRAFT CONTEXT DURING INTERRUPT ────────────────────
-                    snap_vals = snap.values if hasattr(snap, "values") else {}
-                    if snap_vals.get("draft_reply") and snap_vals.get("selected_email"):
-                        threads[req.thread_id]["last_draft"] = {
-                            "selected_email": snap_vals["selected_email"],
-                            "draft_reply": snap_vals["draft_reply"],
-                        }
                     break
             if interrupt_question:
                 break
@@ -359,17 +335,23 @@ async def chat(req: ChatRequest):
         review_data = None
         has_draft = bool(state.get("draft_reply"))
         has_review = state.get("review_granted", False)
+        
+        # Suppress review_data after a successful save/send action
+        draft_was_executed = "_save_draft_" in user_message or "_send_draft_" in user_message
 
-        if is_human_review_turn or (has_draft and not has_review):
+        if (is_human_review_turn or (has_draft and not has_review)) and not draft_was_executed:
             selected = email_card or {}
             # Gather attachment names for the review card
             from agent.tools.gmail import _get_thread_attachments
             pending_atts = _get_thread_attachments(req.thread_id)
             att_names = [a.get("filename", "file") for a in pending_atts if a.get("filename")]
+            # Prefer the actual args the LLM passed to create_gmail_draft so the
+            # review card reflects the real recipient/subject/body, not defaults.
+            tool_args = _extract_draft_tool_args(result.get("messages", []))
             review_data = {
-                "draft": state.get("draft_reply") or "",
-                "to": selected.get("from_", ""),
-                "subject": selected.get("subject", ""),
+                "draft": tool_args.get("body") or state.get("draft_reply") or "",
+                "to": tool_args.get("to") or selected.get("from_", ""),
+                "subject": tool_args.get("subject") or selected.get("subject", ""),
                 "threadId": req.thread_id,
                 "originalBody": selected.get("body", ""),
                 "originalFrom": selected.get("from_", ""),
@@ -384,23 +366,30 @@ async def chat(req: ChatRequest):
         else:
             # Get raw LLM output
             raw_ai = _last_ai_content(result.get("messages", []))
-            
+
+            # Strip any leaked [DRAFT PREVIEW] blocks from the LLM output
+            raw_ai = re.sub(r"\[DRAFT PREVIEW\][\s\S]*", "", raw_ai, flags=re.IGNORECASE).strip()
+            raw_ai = re.sub(r"---\s*\[DRAFT PREVIEW\][\s\S]*?---", "", raw_ai, flags=re.IGNORECASE).strip()
+
             # If we have an email card, strip the redundant header text
             if email_card and email_card.get("body"):
                 ai_response = interrupt_question or raw_ai
                 ai_response = re.sub(r"(?s)\*\*From:\*\*.*?\*\*Body:\*\*.*?\n\n", "", ai_response).strip()
             else:
-                if user_message.startswith("_") and any(confirm in raw_ai.lower() for confirm in ["saved", "sent", "נשלח", "נשמר"]):
-                    ai_response = raw_ai
-                else:
-                    ai_response = interrupt_question or raw_ai
+                ai_response = interrupt_question or raw_ai
+
+            # If user explicitly saved/sent, provide a concrete message if AI didn't
+            if "_save_draft_" in user_message and not ai_response:
+                ai_response = "✅ Draft successfully saved to your Gmail!"
+            elif "_send_draft_" in user_message and not ai_response:
+                ai_response = "✅ Email sent successfully!"
 
         is_selection = _is_numerical_selection(user_message) or user_message.lower().startswith("select")
         is_action = user_message.startswith("_") or any(confirm in ai_response.lower() for confirm in ["saved", "sent", "נשלח", "נשמר"])
         
         if is_selection or is_action:
             ai_response = re.sub(r"I found \d+ relevant options?\.?", "", ai_response, flags=re.IGNORECASE).strip()
-            if not ai_response:
+            if not ai_response and is_selection:
                 ai_response = "מתבצע..." if bool(re.search(r"[\u0590-\u05FF]", user_message)) else "Processing..."
 
         threads[req.thread_id]["messages"] = result["messages"]

@@ -81,19 +81,28 @@ SYSTEM_PROMPT = """You are a professional email assistant. You help users find, 
 ## Core Rules
 1. **BE CONCISE**: Never repeat your instructions or re-introduce yourself.
 2. **NO REDUNDANCY**: Do NOT list email options or summaries in your text if a card will be shown.
-3. **SEARCH PERSISTENCE**: If `search_gmail` returns nothing, try broader keywords or English transliterations immediately.
-4. **SELECTION HANDLING**: 
+3. **NEVER output [DRAFT PREVIEW] blocks** — draft previews are rendered automatically by the UI. Your text response after a draft action must be a single short sentence (e.g. "✅ Email sent!" or "Draft saved."), nothing more.
+4. **SEARCH PERSISTENCE**: If `search_gmail` returns nothing, try broader keywords or English transliterations immediately.
+4. **SELECTION HANDLING**:
    - If the user provides a number (e.g., "1", "2") or says "Select email: [Subject]", YOU MUST IMMEDIATELY call `get_email_content` with the matching ID from the previous search results.
    - NEVER ask "Which one?" if the user has already provided a selection.
    - If you see search results in the history and the user makes a selection, do NOT call `search_gmail` again.
-5. **TEXT RESPONSE GUIDELINES**: Only write text when asking a question, prompting for action, or confirming success.
-6. **LANGUAGE**: Always respond in the same language as the user (Hebrew/English).
+5. **COMPOUND INTENT**: If the user's original message asked to both find AND reply/send (e.g., "find the email from X and reply to them"), after `get_email_content` succeeds you MUST immediately call `draft_reply` without asking permission — the user already expressed their intent.
+6. **TEXT RESPONSE GUIDELINES**: Only write text when asking a question, prompting for action, or confirming success.
+7. **LANGUAGE**: Always respond in the same language as the user (Hebrew/English).
 
 ## Workflow
 - Search ➔ `search_gmail`. If multiple results, wait for user selection.
 - Select/Read ➔ `get_email_content`. Then ask: "Would you like me to draft a reply?".
 - Draft ➔ `draft_reply`.
-- Execute ➔ `create_gmail_draft`.
+- Execute ➔ `create_gmail_draft`. Always call this tool — NEVER describe the draft in plain text instead of calling the tool.
+
+## After a draft exists (saved or pending), reason about what the user wants:
+- **Send intent** (any phrasing: "send it", "go ahead", "i want to sent it", "yes please send"): call `create_gmail_draft` immediately with the same `to`, `subject`, `body` from the conversation. Do NOT ask again.
+- **Reject/cancel** (any phrasing: "never mind", "forget it", "don't send", "cancel"): acknowledge and discard the draft. Do not call any tool.
+- **Modify** (any phrasing: "change the tone", "make it shorter", "add a sentence about X"): call `draft_reply` with the updated instruction and the original email context.
+- **Question** (user asks something unrelated to send/reject/modify): answer the question directly without touching the draft.
+- **New subject** (user shifts to a completely different email or task): start fresh — search or respond as appropriate. Leave the previous draft alone.
 """
 
 
@@ -131,8 +140,9 @@ def orchestrator(state: AgentState) -> dict:
         and not (isinstance(msg, AIMessage) and id(msg) in drop_ai_ids)
     ]
 
-    # Sanitize ToolMessage content (strip URLs that cause format errors on some providers)
+    # Sanitize messages before sending to LLM
     sanitized = []
+    _draft_preview_re = re.compile(r"\[DRAFT PREVIEW\][\s\S]*?(?=\n\n\S|\Z)", re.IGNORECASE)
     for msg in trimmed_msgs:
         if isinstance(msg, ToolMessage) and isinstance(msg.content, str):
             content = msg.content
@@ -150,6 +160,12 @@ def orchestrator(state: AgentState) -> dict:
                     pass
             if content != msg.content:
                 msg = ToolMessage(content=content, tool_call_id=msg.tool_call_id, name=tool_msg_name or None)
+            sanitized.append(msg)
+        elif isinstance(msg, HumanMessage) and isinstance(msg.content, str):
+            # Strip any [DRAFT PREVIEW] blocks that leaked into human messages
+            cleaned = _draft_preview_re.sub("(draft shown in UI)", msg.content).strip()
+            if cleaned != msg.content:
+                msg = HumanMessage(content=cleaned)
             sanitized.append(msg)
         else:
             sanitized.append(msg)
@@ -186,8 +202,9 @@ def orchestrator(state: AgentState) -> dict:
     
     # Clear on success
     if last_msg and isinstance(last_msg, ToolMessage) and getattr(last_msg, "name", "") == "create_gmail_draft":
-        if "successfully" in str(last_msg.content).lower():
-            draft_clear = {"draft_reply": None, "review_granted": False}
+        content_lower = str(last_msg.content).lower()
+        if "success" in content_lower or "sent" in content_lower or "saved" in content_lower:
+            draft_clear = {"draft_reply": None, "review_granted": False, "selected_email": None}
     
     # Clear on explicit rejection in history
     last_human = ""
@@ -257,7 +274,12 @@ def human_review(state: AgentState) -> dict:
         if can_send else
         "Save this as a Gmail draft? (yes / no / describe changes)"
     )
-    user_input = interrupt({"question": f"{preview}\n\n{action_prompt}"})
+    # "question" drives the UI review card; "llm_context" is a short summary
+    # so the orchestrator doesn't echo the raw preview block back to the user.
+    user_input = interrupt({
+        "question": f"{preview}\n\n{action_prompt}",
+        "llm_context": f"Draft ready — To: {to_addr}, Subject: {subject_line}. Waiting for user decision.",
+    })
 
     normalized = re.sub(r"\s+", " ", str(user_input).strip().lower())
     normalized_no_punct = re.sub(r"[^\w\s\u0590-\u05FF]", "", normalized).strip()

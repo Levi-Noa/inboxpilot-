@@ -258,10 +258,16 @@ def tool_executor(state: AgentState) -> dict:
     except Exception:
         payload = None
 
-    # After create_gmail_draft: consume approval gate, clear draft, signal end
+    # After create_gmail_draft: consume approval gate
     if tool_name == SEND_TOOL_NAME:
         result["review_granted"] = False
-        result["draft_reply"] = None
+        result["force_save_draft"] = False
+        # Clear draft only when actually sent — keep it after a save so the LLM
+        # can reason about sending it later if the user asks.
+        action = (payload or {}).get("action", "")
+        if action == "sent":
+            result["draft_reply"] = None
+            result["selected_email"] = None
 
     if not payload:
         return result
