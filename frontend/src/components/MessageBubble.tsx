@@ -7,6 +7,12 @@ interface MessageBubbleProps {
 export default function MessageBubble({ message }: MessageBubbleProps) {
   const isUser = message.role === 'human'
   const isSystem = message.role === 'system'
+  const hasStructuredCard = Boolean(
+    message.searchResults?.length || message.emailCard || message.reviewData
+  )
+
+  // Card-first UX: when structured content exists, suppress duplicate assistant narration.
+  if (!isUser && !isSystem && hasStructuredCard) return null
 
   if (!message.content.trim()) return null
 

@@ -3,6 +3,9 @@ LLM-based tools: draft_reply and rank_results.
 Uses OpenAI via OPENAI_API_KEY and LLM_MODEL env vars.
 """
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import os
 from langchain_core.tools import tool
 from agent.tools.retry import with_retries
@@ -10,6 +13,13 @@ from agent.tools.retry import with_retries
 _llm_instance = None
 _draft_llm_instance = None
 _DEBUG_TIMING = os.getenv("GMAIL_DEBUG_TIMING", "0").lower() in {"1", "true", "yes", "on"}
+
+
+def reset_runtime_llm_clients() -> None:
+    """Clear cached OpenAI clients so updated env settings are always applied."""
+    global _llm_instance, _draft_llm_instance
+    _llm_instance = None
+    _draft_llm_instance = None
 
 
 def _safe_error(message: str, exc: Exception | None = None) -> str:
@@ -27,6 +37,7 @@ def _get_llm(model: str = ""):
     from langchain_openai import ChatOpenAI
     _model = model or os.getenv("LLM_MODEL", "gpt-4o")
     api_key = os.getenv("OPENAI_API_KEY") or None
+    print(f"DEBUG: LLM TOOL. Key exists: {bool(api_key)} Len: {len(api_key) if api_key else 0}", flush=True)
     base_url = os.getenv("OPENAI_BASE_URL") or None
     llm = ChatOpenAI(model=_model, temperature=0.3, base_url=base_url, max_tokens=600, api_key=api_key)
     if not model:
@@ -40,7 +51,8 @@ def _get_draft_llm():
     if _draft_llm_instance is not None:
         return _draft_llm_instance
     draft_model = os.getenv("DRAFT_LLM_MODEL", "")
-    return _get_llm(model=draft_model) if draft_model else _get_llm()
+    _draft_llm_instance = _get_llm(model=draft_model) if draft_model else _get_llm()
+    return _draft_llm_instance
 
 
 @tool

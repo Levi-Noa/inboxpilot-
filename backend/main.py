@@ -1,11 +1,17 @@
-try:
-    from backend import config  # type: ignore  # Load path configuration first
-except Exception:
-    import config  # type: ignore  # Fallback for direct script execution
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import os
+load_dotenv()
+
+key = os.environ.get("OPENAI_API_KEY", "")
+print(f"DEBUG: App starting. Key exists: {bool(key)} Len: {len(key)} Suffix: {key[-4:] if key else 'N/A'}", flush=True)
+print(f"DEBUG: CWD: {os.getcwd()}", flush=True)
+
+try:
+    from backend import config  # type: ignore
+except Exception:
+    pass # config handled via environment variables or local import
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 import re
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from pydantic import BaseModel
@@ -18,20 +24,18 @@ from agent.tools.gmail import (
     ensure_gmail_authenticated,
     set_thread_attachments,
     clear_thread_attachments,
+    get_oauth_status,
+    reset_oauth_state,
 )
-
-load_dotenv()
 
 app = FastAPI(title="InboxPilot API", version="1.0.0")
 
-# Enable CORS for React frontend
+# Enable CORS for React frontend (Port 3000)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        "http://localhost:5173",
         "http://127.0.0.1:3000",
-        "http://127.0.0.1:5173",
     ],
     allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
@@ -106,11 +110,32 @@ def _is_search_query(text: str) -> bool:
     return any(qw in t.lower() for qw in question_words)
 
 
+def _extract_recipient_override(text: str) -> str | None:
+    """Extract an explicit recipient override from user text when intent indicates changing target address."""
+    if not text:
+        return None
+
+    match = re.search(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b", text)
+    if not match:
+        return None
+
+    normalized = text.strip().lower()
+    change_markers = [
+        "send to", "reply to", "recipient", "address", "instead",
+        "לכתובת", "למייל", "תשנה", "שנה", "במקום", "שלח ל",
+    ]
+    if any(marker in normalized for marker in change_markers):
+        return match.group(0)
+    return None
+
+
 def _is_selection_turn(snap) -> bool:
     """True if the graph is currently waiting at the select_email interrupt."""
-    for task in (snap.tasks or []):
-        for intr in (getattr(task, "interrupts", None) or []):
-            val = intr.value if hasattr(intr, "value") else intr
+    tasks = getattr(snap, "tasks", []) or []
+    for task in tasks:
+        interrupts = getattr(task, "interrupts", []) or []
+        for intr in interrupts:
+            val = getattr(intr, "value", intr)
             if isinstance(val, dict) and "results" in val:
                 return True
     return False
@@ -118,9 +143,11 @@ def _is_selection_turn(snap) -> bool:
 
 def _is_human_review_turn(snap) -> bool:
     """True if the graph is currently waiting at the human_review interrupt."""
-    for task in (snap.tasks or []):
-        for intr in (getattr(task, "interrupts", None) or []):
-            val = intr.value if hasattr(intr, "value") else intr
+    tasks = getattr(snap, "tasks", []) or []
+    for task in tasks:
+        interrupts = getattr(task, "interrupts", []) or []
+        for intr in interrupts:
+            val = getattr(intr, "value", intr)
             if isinstance(val, dict) and "question" in val and "results" not in val:
                 return True
     return False
@@ -186,17 +213,9 @@ async def chat(req: ChatRequest):
     Send a message to the AI agent
     """
     try:
-        # Runtime model/provider selection (keeps Qwen while enabling OpenAI).
-        requested_model = (req.model or "").strip() or os.getenv("LLM_MODEL", "qwen/qwen3-32b")
-        requested_provider = (req.provider or "").strip().lower()
-
-        if not requested_provider:
-            if requested_model.startswith("qwen/"):
-                requested_provider = "groq"
-            elif requested_model.startswith("gpt-"):
-                requested_provider = "openai"
-            else:
-                requested_provider = os.getenv("LLM_PROVIDER", "groq").lower()
+        # Select model and provider (Defaults to OpenAI/gpt-4o)
+        requested_model = (req.model or "").strip() or os.getenv("LLM_MODEL", "gpt-4o")
+        requested_provider = (req.provider or "").strip().lower() or os.getenv("LLM_PROVIDER", "openai").lower()
 
         set_runtime_llm(
             model=requested_model,
@@ -211,6 +230,8 @@ async def chat(req: ChatRequest):
                 "waiting_for_interrupt": False,
                 "last_email_card_id": None,   # for dedup email cards
                 "last_draft": None,           # for re-send after save
+                "recipient_override": None,   # optional recipient override from user instruction
+                "selected_email": None,
             }
 
         attachments_payload = [a.model_dump() for a in (req.attachments or [])]
@@ -227,6 +248,13 @@ async def chat(req: ChatRequest):
         threads[req.thread_id].setdefault("waiting_for_interrupt", False)
         threads[req.thread_id].setdefault("last_email_card_id", None)
         threads[req.thread_id].setdefault("last_draft", None)
+        threads[req.thread_id].setdefault("recipient_override", None)
+        threads[req.thread_id].setdefault("selected_email", None)
+
+        # Capture explicit recipient override requests (e.g., "send to noa@example.com instead").
+        override_to = _extract_recipient_override(user_message)
+        if override_to:
+            threads[req.thread_id]["recipient_override"] = override_to
 
         # ── Re-send after draft saved ─────────────────────────────────────────
         # If interrupt is NOT active but user expressed send intent and we have
@@ -246,14 +274,23 @@ async def chat(req: ChatRequest):
                 "review_granted": True,
                 "force_save_draft": False,
             }
+            if threads[req.thread_id].get("recipient_override") and graph_input.get("selected_email"):
+                graph_input["selected_email"]["from_"] = threads[req.thread_id]["recipient_override"]
             result = graph.invoke(graph_input, config)
             threads[req.thread_id]["last_draft"] = None  # consumed
         elif threads[req.thread_id].get("waiting_for_interrupt"):
             threads[req.thread_id]["waiting_for_interrupt"] = False
+            update_payload = {}
+            selected_for_update = threads[req.thread_id].get("selected_email")
+            if threads[req.thread_id].get("recipient_override") and selected_for_update:
+                updated_selected = dict(selected_for_update)
+                updated_selected["from_"] = threads[req.thread_id]["recipient_override"]
+                update_payload["selected_email"] = updated_selected
             if "_save_draft_" in user_message:
-                result = graph.invoke(Command(resume=user_message, update={"force_save_draft": True, "review_granted": True}), config)
+                update_payload.update({"force_save_draft": True, "review_granted": True})
+                result = graph.invoke(Command(resume=user_message, update=update_payload), config)
             else:
-                result = graph.invoke(Command(resume=user_message), config)
+                result = graph.invoke(Command(resume=user_message, update=update_payload), config)
         else:
             if "_save_draft_" in user_message:
                 graph_input = {
@@ -266,6 +303,14 @@ async def chat(req: ChatRequest):
                 graph_input = {
                     "messages": threads[req.thread_id]["messages"]
                 }
+
+            selected_for_input = threads[req.thread_id].get("selected_email")
+            if selected_for_input:
+                graph_input["selected_email"] = selected_for_input
+            if threads[req.thread_id].get("recipient_override") and graph_input.get("selected_email"):
+                graph_input["selected_email"] = dict(graph_input["selected_email"])
+                graph_input["selected_email"]["from_"] = threads[req.thread_id]["recipient_override"]
+
             result = graph.invoke(graph_input, config)
 
         # Check if the graph paused at an interrupt after this turn
@@ -299,6 +344,16 @@ async def chat(req: ChatRequest):
         state = snap.values if hasattr(snap, "values") else {}
         search_results = state.get("ranked_emails") or state.get("search_results", [])
         email_card = state.get("selected_email")
+
+        # Track latest selected email snapshot for later recipient overrides.
+        if email_card:
+            threads[req.thread_id]["selected_email"] = email_card
+
+        # Apply recipient override to displayed card/review data when present.
+        recipient_override = threads[req.thread_id].get("recipient_override")
+        if recipient_override and email_card:
+            email_card = dict(email_card)
+            email_card["from_"] = recipient_override
 
         # ── Build review_data payload ─────────────────────────────────────────
         review_data = None
@@ -340,18 +395,10 @@ async def chat(req: ChatRequest):
                 else:
                     ai_response = interrupt_question or raw_ai
 
-        # Only override with "I found X" if we're actually in a search results state
         is_selection = _is_numerical_selection(user_message) or user_message.lower().startswith("select")
         is_action = user_message.startswith("_") or any(confirm in ai_response.lower() for confirm in ["saved", "sent", "נשלח", "נשמר"])
         
-        if search_results and not is_human_review_turn and not is_selection and not is_action:
-            is_hebrew_msg = bool(re.search(r"[\u0590-\u05FF]", user_message))
-            n = len(search_results)
-            if is_hebrew_msg:
-                ai_response = f"מצאתי {n} {'אפשרורת' if n == 1 else 'אפשרויות'} רלוונטיות. בחר/י אחת מהאפשרויות למטה."
-            else:
-                ai_response = f"I found {n} relevant option{'s' if n != 1 else ''}. Please select one below."
-        elif is_selection or is_action:
+        if is_selection or is_action:
             ai_response = re.sub(r"I found \d+ relevant options?\.?", "", ai_response, flags=re.IGNORECASE).strip()
             if not ai_response:
                 ai_response = "מתבצע..." if bool(re.search(r"[\u0590-\u05FF]", user_message)) else "Processing..."
@@ -378,6 +425,7 @@ async def chat(req: ChatRequest):
         # Clear one-shot attachments after any tool run
         if _contains_create_draft_tool(result.get("messages", [])):
             clear_thread_attachments(req.thread_id)
+            threads[req.thread_id]["recipient_override"] = None
 
         return {
             "response": ai_response,
@@ -424,11 +472,17 @@ async def select_email(req: EmailSelectRequest):
         threads[req.thread_id]["messages"].append(("human", message))
 
         # Run graph
-        graph_input = {
-            "messages": threads[req.thread_id]["messages"]
-        }
         config = {"configurable": {"thread_id": req.thread_id}}
-        result = graph.invoke(graph_input, config)
+        
+        # Check if we should resume or invoke
+        if threads[req.thread_id].get("waiting_for_interrupt"):
+            threads[req.thread_id]["waiting_for_interrupt"] = False
+            result = graph.invoke(Command(resume=message), config)
+        else:
+            graph_input = {
+                "messages": threads[req.thread_id]["messages"]
+            }
+            result = graph.invoke(graph_input, config)
 
         # Get response
         ai_response = _last_ai_content(result.get("messages", []))

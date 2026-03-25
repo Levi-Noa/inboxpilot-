@@ -105,7 +105,7 @@ python main.py
 ```bash
 cd frontend
 npm run dev
-# React UI opens at http://localhost:5173
+# React UI opens at http://localhost:3000
 ```
 
 ### CLI Mode (no UI)

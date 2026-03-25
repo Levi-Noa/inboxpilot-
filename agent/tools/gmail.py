@@ -6,6 +6,9 @@ the user to grant access. The resulting token is saved to token.json
 for subsequent runs (no browser prompt needed after that).
 """
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import os
 import base64
 import logging
@@ -52,6 +55,12 @@ _CUSTOM_RANKING_FALLBACK = os.getenv("CUSTOM_RANKING_FALLBACK", "1").lower() in 
 _MAX_RETURN_RESULTS = min(10, max(3, int(os.getenv("GMAIL_RETURN_RESULTS", "3"))))
 _AUTO_SELECT_MIN_SCORE = float(os.getenv("AUTO_SELECT_MIN_SCORE", "5.0"))
 _AUTO_SELECT_RATIO = float(os.getenv("AUTO_SELECT_RATIO", "1.8"))
+
+
+def reset_rank_llm_cache() -> None:
+    """Clear cached ranking/query-builder LLM so new env auth/model takes effect."""
+    global _rank_llm
+    _rank_llm = None
 
 _STOPWORDS = {
     "the", "a", "an", "to", "for", "of", "on", "about", "please", "help", "me", "reply", "respond", "email", "mail",
@@ -108,9 +117,11 @@ def _expand_query_with_heuristics(query: str, user_query: str) -> str:
 
 
 def _extract_keywords(text: str) -> list[str]:
-    """Extract meaningful English/Hebrew keywords from free-form user text."""
+    """Extract meaningful English/Hebrew keywords. Strips Hebrew punctuation for fuzzy matching."""
     if not text:
         return []
+    # Normalize Hebrew geresh/gershayim for better matching
+    text = text.replace("'", "").replace('"', "").replace("׳", "").replace("״", "")
     tokens = re.findall(r"[A-Za-z0-9\u0590-\u05FF]+", text.lower())
     filtered = [t for t in tokens if _is_meaningful_token(t) and t not in _STOPWORDS]
     seen = set()
@@ -129,6 +140,7 @@ def _get_rank_llm():
         from langchain_openai import ChatOpenAI
         rank_model = os.getenv("RANK_LLM_MODEL", os.getenv("LLM_MODEL", "gpt-4o-mini"))
         api_key = os.getenv("OPENAI_API_KEY") or None
+        print(f"DEBUG: GMAIL RANK LLM. Key exists: {bool(api_key)} Len: {len(api_key) if api_key else 0}", flush=True)
         base_url = os.getenv("OPENAI_BASE_URL") or None
         _rank_llm = ChatOpenAI(model=rank_model, temperature=0, max_tokens=200,
                                base_url=base_url, api_key=api_key)
@@ -158,14 +170,15 @@ Gmail query operators you can use:
 - Plain words              — full-text search in body/subject/snippet
 
 Rules:
-- ALWAYS transliterate non-Latin names to English/Latin characters. Examples: עידו→ido, נועה→noa, מירית→mirit, יוסי→yosi, דני→dani, שרה→sara, דוד→david, משה→moshe, רחל→rachel
+- ALWAYS transliterate non-Latin names to English/Latin characters.
 - "recently"/"לאחרונה" → newer_than:7d
 - "today"/"היום" → newer_than:1d
 - "yesterday"/"אתמול" → newer_than:2d
 - "this week"/"השבוע" → newer_than:7d
-- "this month"/"החודש" → newer_than:30d
-- Translate topic/subject keywords to English when possible
-- Combine multiple operators as needed
+- **SEMANTIC EXPANSION**: If the user is looking for a topic (e.g., "meal"), generate a query that includes common synonyms and relevant terms in BOTH English and Hebrew using OR. 
+  Example: `(meal OR food OR "ארוחה" OR "הזמנה" OR "receipt")`
+- **LANGUAGE AGNOSTIC**: Always include both English and Hebrew versions of keywords if applicable.
+- **BRAND SENSITIVITY**: If a brand is mentioned, search for both the brand name and the category (e.g., "McDonalds" -> `(McDonalds OR "מקדונלדס" OR "food" OR "order")`).
 - Output ONLY the Gmail query string, nothing else. No explanation, no quotes."""
 
 
@@ -191,44 +204,43 @@ def _llm_build_gmail_query(user_text: str) -> str | None:
 
 
 def _build_query_candidates(query: str, user_query: str) -> list[str]:
-    """Build multiple Gmail query candidates from natural language + keyword intent."""
+    """Build multiple Gmail query candidates with LLM-driven semantic broadening."""
     base_query = (query or "").strip()
     combined = f"{query} {user_query}".strip()
     keywords = _extract_keywords(combined)
 
-    operator_terms = re.findall(r"(?:from|subject|newer_than|older_than):\S+", base_query)
-    plain_query = re.sub(r"(?:from|subject|newer_than|older_than):\S+", " ", base_query)
-    plain_query = " ".join(plain_query.split())
-
     candidates = []
 
-    # LLM-generated query gets highest priority — it understands intent, transliterates names, adds operators
+    # 1. LLM-generated query (Highest priority - now does semantic expansion)
     llm_query = _llm_build_gmail_query(user_query or query)
     if llm_query:
         candidates.append(llm_query)
 
+    # 2. Base query
     if base_query:
         candidates.append(base_query)
 
-    # Try operator-aware variants first, then progressively relax constraints.
+    # 3. Operator relaxation
+    operator_terms = re.findall(r"(?:from|subject|newer_than|older_than):\S+", base_query)
+    plain_query = re.sub(r"(?:from|subject|newer_than|older_than):\S+", " ", base_query)
+    plain_query = " ".join(plain_query.split())
+
     if plain_query and operator_terms:
-        candidates.append(f"{plain_query} {' '.join(operator_terms[:2])}".strip())
-        for term in operator_terms[:3]:
-            candidates.append(f"{plain_query} {term}".strip())
+        # Just keywords from the primary query
         candidates.append(plain_query)
 
+    # 4. Plain keywords + fuzzy varieties
     if keywords:
         candidates.append(" ".join(keywords[:4]))
         candidates.append("(" + " OR ".join(keywords[:6]) + ")")
+        
+        fuzzy_keywords = [k.replace("'", "").replace("׳", "") for k in keywords]
+        if fuzzy_keywords != keywords:
+            candidates.append(" ".join(fuzzy_keywords[:4]))
 
-    expanded = _expand_query_with_heuristics(base_query or combined, combined)
-    if expanded:
-        candidates.append(expanded)
-
-    # For high-intent phrases, prioritize subject-centric fallback.
-    lower_combined = combined.lower()
-    if any(phrase in lower_combined for phrase in _HIGH_INTENT_PHRASES):
-        candidates.append('subject:("רשימת קניות" OR "shopping list" OR "grocery list" OR "grosery")')
+    # 5. Global broadening (Last resort)
+    stripped = re.sub(r'[^\w\s]', ' ', combined)
+    candidates.append(" ".join(stripped.split()[:3]))
 
     # De-duplicate while preserving order.
     seen = set()
@@ -238,7 +250,7 @@ def _build_query_candidates(query: str, user_query: str) -> list[str]:
         if item and item not in seen:
             seen.add(item)
             unique.append(item)
-    return unique[:_MAX_QUERY_ATTEMPTS]
+    return unique[:10] # Try more candidates if needed
 
 
 def _structured_constraint_terms(search_constraints: str) -> list[str]:
@@ -272,6 +284,35 @@ def _structured_constraint_terms(search_constraints: str) -> list[str]:
         if key not in seen:
             seen.add(key)
             unique.append(term)
+    return unique
+
+
+def _deduplicate_results(results: list[dict]) -> list[dict]:
+    """Remove near-duplicate emails based on subject and sender."""
+    if not results:
+        return []
+    
+    unique = []
+    seen_keys = set()
+    
+    for item in results:
+        subj = (item.get("subject") or "").lower().strip()
+        # Strip Re: and Fwd:
+        subj = re.sub(r"^(re|fwd|fw):\s*", "", subj, flags=re.IGNORECASE)
+        # Handle Hebrew variations
+        subj = re.sub(r"^(מע|הועבר):\s*", "", subj, flags=re.IGNORECASE)
+        
+        sender = (item.get("from_") or "").lower().strip()
+        # Use first 40 chars of snippet for near-duplicate check
+        snip = (item.get("snippet") or "").lower().strip()[:40]
+        
+        # Key is Subject + Sender + start of Snippet
+        key = f"{subj}|{sender}|{snip}"
+        
+        if key not in seen_keys:
+            seen_keys.add(key)
+            unique.append(item)
+            
     return unique
 
 
@@ -653,27 +694,51 @@ def _get_thread_gmail_service():
 
 
 def _strip_html(html: str) -> str:
-    """Remove HTML tags and decode common entities."""
+    """Remove HTML tags, style/script blocks, and decode common entities."""
+    # Remove style and script blocks entirely (including their content)
+    html = re.sub(r"<(style|script)[^>]*>.*?</\1>", " ", html, flags=re.DOTALL | re.IGNORECASE)
+    # Remove all other tags
     text = re.sub(r"<[^>]+>", " ", html)
+    # Decode common entities
     text = text.replace("&nbsp;", " ").replace("&amp;", "&")
     text = text.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"')
     return re.sub(r"\s+", " ", text).strip()
 
 
 def _decode_body(payload: dict) -> str:
-    """Recursively extract and decode plain-text body from Gmail payload."""
+    """Recursively extract and decode plain-text body, prioritizing text/plain."""
     mime_type = payload.get("mimeType", "")
     body_data = payload.get("body", {}).get("data", "")
 
+    # Priority 1: Direct text/plain
     if mime_type == "text/plain" and body_data:
-        return base64.urlsafe_b64decode(body_data).decode("utf-8", errors="replace")
+        try:
+            return base64.urlsafe_b64decode(body_data).decode("utf-8", errors="replace")
+        except Exception:
+            pass
+
+    # Priority 2: Check parts for text/plain
+    parts = payload.get("parts", [])
+    for part in parts:
+        if part.get("mimeType") == "text/plain":
+            res = _decode_body(part)
+            if res:
+                return res
+
+    # Priority 3: text/html (if no plain text found)
     if mime_type == "text/html" and body_data:
-        raw = base64.urlsafe_b64decode(body_data).decode("utf-8", errors="replace")
-        return _strip_html(raw)
-    for part in payload.get("parts", []):
-        result = _decode_body(part)
-        if result:
-            return result
+        try:
+            raw = base64.urlsafe_b64decode(body_data).decode("utf-8", errors="replace")
+            return _strip_html(raw)
+        except Exception:
+            pass
+
+    # Priority 4: Recursively check other parts
+    for part in parts:
+        if part.get("mimeType") != "text/plain": # Already checked plain
+            res = _decode_body(part)
+            if res:
+                return res
     return ""
 
 
@@ -701,14 +766,9 @@ def _fetch_metadata(msg_id: str, thread_id: str) -> dict:
 
 def _rank_results_with_llm(user_query: str, results: list[dict]) -> list[dict]:
     """
-    Re-rank search results by relevance to user_query using a lightweight LLM.
-    Falls back to date order if LLM fails or returns unusable output.
-    Returns top 3 ranked results.
+    Semantic Reranker: Score results by relevance to user intent, across languages.
     """
     if len(results) <= 1:
-        return results[:_MAX_RETURN_RESULTS]
-
-    if os.getenv("LLM_PROVIDER", "openai").lower() == "ollama" and not _ENABLE_OLLAMA_RERANK:
         return results[:_MAX_RETURN_RESULTS]
 
     try:
@@ -718,15 +778,18 @@ def _rank_results_with_llm(user_query: str, results: list[dict]) -> list[dict]:
         emails_text = "\n".join(
             f"[{i+1}] From: {e.get('from_', '?')} | "
             f"Subject: {e.get('subject', '?')} | "
-            f"Snippet: {e.get('snippet', '')[:80]}"
+            f"Snippet: {e.get('snippet', '')[:120]}"
             for i, e in enumerate(results)
         )
 
         prompt = (
-            f'User is looking for: "{user_query}"\n\n'
-            f"Results:\n{emails_text}\n\n"
-            f"Return ONLY the numbers of the top {_MAX_RETURN_RESULTS} most relevant, comma-separated (e.g. 2,1,3). "
-            "Numbers only."
+            "You are a semantic reranker for an email assistant. "
+            "The user might speak Hebrew while the emails are in English, or vice versa. "
+            "Find the emails that BEST match the intent, even if keywords don't match literally.\n\n"
+            f"User Intent: \"{user_query}\"\n\n"
+            f"Email Candidates:\n{emails_text}\n\n"
+            f"Return ONLY a comma-separated list of the top {_MAX_RETURN_RESULTS} most relevant indices (e.g., 2,1,5). "
+            "If none match, return '0'. Numbers only."
         )
 
         response = with_retries(lambda: llm.invoke(prompt))
@@ -740,10 +803,10 @@ def _rank_results_with_llm(user_query: str, results: list[dict]) -> list[dict]:
 
         ranked = [results[i] for i in indices[:_MAX_RETURN_RESULTS]]
         _log_timing("rerank_llm", time.perf_counter() - t0)
-        return ranked[:_MAX_RETURN_RESULTS] if ranked else results[:_MAX_RETURN_RESULTS]
+        return ranked if ranked else results[:_MAX_RETURN_RESULTS]
 
     except Exception:
-        return results[:_MAX_RETURN_RESULTS]  # Fallback to date order
+        return results[:_MAX_RETURN_RESULTS]
 
 
 def _search_gmail_raw(service, query: str) -> list[dict]:
@@ -784,7 +847,7 @@ def _collect_candidate_messages(service, candidates: list[str], default_query: s
         if i == 0 and messages_by_id:
             break
 
-        if len(messages_by_id) >= 6:
+        if len(messages_by_id) >= 20:
             break
 
     return list(messages_by_id.values()), first_hit_query or used_query
@@ -859,10 +922,13 @@ def search_gmail(query: str = "", user_query: str = "", q: str = "", search_cons
         results = _fetch_metadata_batch(messages)
         _log_timing("messages_get_metadata_parallel", time.perf_counter() - t_meta)
 
+        # ── Deduplicate ──
+        deduped_results = _deduplicate_results(results)
+
         ranked, ranking_mode = _rank_candidates(
             query=used_query,
             user_query=effective_user_query or normalized_query,
-            results=results,
+            results=deduped_results,
         )
 
         ranked_limited = ranked[:_MAX_RETURN_RESULTS]

@@ -120,7 +120,7 @@ export default function ChatInterface({
           <div className="h-full min-h-[420px] flex items-center justify-center fade-up">
             <div className="max-w-xl text-center">
               <div className="mx-auto h-16 w-16 rounded-2xl bg-gradient-to-br from-teal-300 to-cyan-400 text-slate-900 grid place-items-center text-2xl font-bold title-font mb-5 soft-ring">AI</div>
-              <h3 className="title-font text-3xl md:text-4xl text-slate-800">Email operations cockpit</h3>
+              <h3 className="title-font text-3xl md:text-4xl text-slate-800">Email operations copilot</h3>
               <p className="text-slate-600 mt-3">Ask naturally, inspect results, and draft safely with an agent workflow that stays auditable.</p>
 
               <div className="mt-6 grid gap-2">

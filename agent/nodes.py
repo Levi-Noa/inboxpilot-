@@ -7,22 +7,27 @@ based on conversation context. No deterministic overrides or planner routing.
 Set LLM_PROVIDER=openai (default), azure_openai, groq, or ollama in your .env.
 """
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import os
 import re
 import json
-from dotenv import load_dotenv
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 from langgraph.types import interrupt
 
 from agent.state import AgentState
 from agent.tools.gmail import search_gmail, get_email_content, create_gmail_draft
-from agent.tools.llm import draft_reply
-
-load_dotenv()
+from agent.tools.gmail import reset_rank_llm_cache
+from agent.tools.llm import draft_reply, reset_runtime_llm_clients
 _llm_with_tools = None
 
 APPROVAL_KEYWORDS = {"yes", "y", "save", "approve", "approved", "ok", "okay", "go ahead", "send it"}
 CANCEL_KEYWORDS = {"no", "cancel", "stop", "never mind", "quit", "exit", "לא", "בטל", "עצור"}
+
+SEND_DRAFT_COMMAND = "_send_draft_"
+SAVE_DRAFT_COMMAND = "_save_draft_"
+REJECT_DRAFT_COMMAND = "_reject_draft_"
 
 
 def _get_llm():
@@ -48,6 +53,9 @@ def set_runtime_llm(model: str, openai_api_key: str | None = None) -> None:
     os.environ["LLM_MODEL"] = model
     if openai_api_key:
         os.environ["OPENAI_API_KEY"] = openai_api_key.strip()
+    # Ensure all LLM clients are rebuilt with the latest model/key values.
+    reset_runtime_llm_clients()
+    reset_rank_llm_cache()
     _llm_with_tools = None
 
 
@@ -71,21 +79,21 @@ TOOLS = [
 SYSTEM_PROMPT = """You are a professional email assistant. You help users find, read, and reply to emails.
 
 ## Core Rules
-1. **BE CONCISE**: Never repeat your instructions or re-introduce yourself. Never say "I can help you find emails..." or "I'll search for emails..." if you've already said it or the user knows.
-2. **NO REDUNDANCY**: Do NOT list email options, summaries, or draft previews in your text response if a card will be shown. The UI handles the rich display. You only provide complementary text (like a question or confirmation).
-3. **TEXT RESPONSE GUIDELINES**:
-   - Only write text when asking a question (e.g., "Which email should I open?"), prompting for action ("Would you like me to draft a reply?"), or confirming success.
-   - **SUCCESS CONFIRMATION**: After calling `create_gmail_draft` (save or send), you MUST say: "Reply sent successfully!" or "Draft saved successfully!".
-4. **ALWAYS USE TOOLS**: Never describe an action without calling the corresponding tool.
-5. **LANGUAGE**: Always respond in the same language as the user (Hebrew/English).
+1. **BE CONCISE**: Never repeat your instructions or re-introduce yourself.
+2. **NO REDUNDANCY**: Do NOT list email options or summaries in your text if a card will be shown.
+3. **SEARCH PERSISTENCE**: If `search_gmail` returns nothing, try broader keywords or English transliterations immediately.
+4. **SELECTION HANDLING**: 
+   - If the user provides a number (e.g., "1", "2") or says "Select email: [Subject]", YOU MUST IMMEDIATELY call `get_email_content` with the matching ID from the previous search results.
+   - NEVER ask "Which one?" if the user has already provided a selection.
+   - If you see search results in the history and the user makes a selection, do NOT call `search_gmail` again.
+5. **TEXT RESPONSE GUIDELINES**: Only write text when asking a question, prompting for action, or confirming success.
+6. **LANGUAGE**: Always respond in the same language as the user (Hebrew/English).
 
 ## Workflow
-- Search ➔ `search_gmail`. If 1 result, immediately `get_email_content`. If multiple, wait for user selection.
-- Read ➔ `get_email_content`. Then ask: "Would you like me to draft a reply?".
-- Draft ➔ `draft_reply` (only after user says yes/draft/reply).
-- Review ➔ Wait for user to Approve (yes/send/save) or Reject (no/stop) or Revise (provide feedback).
-- Execute ➔ `create_gmail_draft` immediately upon approval.
-- Final ➔ Say "Reply sent successfully!" or "Draft saved successfully!".
+- Search ➔ `search_gmail`. If multiple results, wait for user selection.
+- Select/Read ➔ `get_email_content`. Then ask: "Would you like me to draft a reply?".
+- Draft ➔ `draft_reply`.
+- Execute ➔ `create_gmail_draft`.
 """
 
 
@@ -169,9 +177,38 @@ def orchestrator(state: AgentState) -> dict:
     messages += fixed
 
     # ── Call LLM ──────────────────────────────────────────────────────────
-    response = llm_with_tools.invoke(messages)
+    response = _get_llm_with_tools().invoke(messages)
 
-    return {"messages": [response]}
+    # ── Clear ephemeral state after action ──────────────────────────────────
+    # If the last ToolMessage was a successful create_gmail_draft, wipe the draft
+    last_msg = fixed[-1] if fixed else None
+    draft_clear = {}
+    
+    # Clear on success
+    if last_msg and isinstance(last_msg, ToolMessage) and getattr(last_msg, "name", "") == "create_gmail_draft":
+        if "successfully" in str(last_msg.content).lower():
+            draft_clear = {"draft_reply": None, "review_granted": False}
+    
+    # Clear on explicit rejection in history
+    last_human = ""
+    for msg in reversed(state.get("messages", [])):
+        if isinstance(msg, HumanMessage):
+            last_human = str(msg.content).strip().lower()
+            break
+    
+    normalized_last_human = re.sub(r"\s+", " ", last_human).strip().lower()
+    normalized_last_human_no_punct = re.sub(r"[^\w\s\u0590-\u05FF]", "", normalized_last_human).strip()
+    explicit_cancel = normalized_last_human in {REJECT_DRAFT_COMMAND} or normalized_last_human_no_punct in CANCEL_KEYWORDS
+    explicit_approval = (
+        normalized_last_human in {SEND_DRAFT_COMMAND, SAVE_DRAFT_COMMAND}
+        or normalized_last_human_no_punct in APPROVAL_KEYWORDS
+    )
+
+    if explicit_cancel and not explicit_approval:
+        draft_clear["draft_reply"] = None
+        draft_clear["review_granted"] = False
+
+    return {"messages": [response], **draft_clear}
 
 
 def human_review(state: AgentState) -> dict:
@@ -222,28 +259,21 @@ def human_review(state: AgentState) -> dict:
     )
     user_input = interrupt({"question": f"{preview}\n\n{action_prompt}"})
 
-    normalized = str(user_input).strip().lower()
+    normalized = re.sub(r"\s+", " ", str(user_input).strip().lower())
+    normalized_no_punct = re.sub(r"[^\w\s\u0590-\u05FF]", "", normalized).strip()
 
-    # Detect "save as draft" intent — approve execution but force draft mode
-    save_draft_phrases = {"save as draft", "save draft", "save to draft", "שמור כטיוטה", "save it as draft"}
-    is_save_draft = any(phrase in normalized for phrase in save_draft_phrases)
-
-    # Explicit "don't send" / "do not send" overrides any save/yes keyword
-    dont_send_phrases = {"dont send", "don't send", "do not send", "אל תשלח", "לא לשלוח"}
-    if any(phrase in normalized for phrase in dont_send_phrases) and not is_save_draft:
-        is_approved = False
-    else:
-        # Substring match — so "save it and approve" / "yes please" etc. all work
-        is_approved = (
-            is_save_draft
-            or normalized in APPROVAL_KEYWORDS
-            or any(kw in normalized for kw in APPROVAL_KEYWORDS)
-        )
+    # Decisions must be explicit to avoid collisions (e.g. "noa" containing "no").
+    save_draft_phrases = {"save as draft", "save draft", "save to draft", "save it as draft", "שמור כטיוטה"}
+    is_save_draft = normalized in {SAVE_DRAFT_COMMAND} or normalized_no_punct in save_draft_phrases
+    is_send_draft = normalized in {SEND_DRAFT_COMMAND} or normalized_no_punct in APPROVAL_KEYWORDS
+    is_rejected = normalized in {REJECT_DRAFT_COMMAND} or normalized_no_punct in CANCEL_KEYWORDS
+    is_approved = is_save_draft or is_send_draft
 
     return {
         "messages": [], # No message here!
         "awaiting_send": False,
         "review_granted": is_approved,
         "force_save_draft": is_save_draft,
+        "draft_reply": None if is_rejected else body, # Clear if rejected
         "draft_attempts": 0,
     }

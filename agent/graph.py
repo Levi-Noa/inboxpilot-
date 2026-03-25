@@ -107,12 +107,11 @@ def select_email(state: AgentState) -> dict:
             # Embed the message_id in the human message so the orchestrator
             # can call get_email_content with the exact correct ID
             human_msg = (
-                f"Option {idx + 1}: {chosen.get('subject', '')} "
-                f"from {chosen.get('from_', '')}. "
-                f"Please call get_email_content with message_id='{chosen.get('id', '')}' now."
+                f"Selected option {idx + 1}: {chosen.get('subject', '')}. "
+                f"Calling get_email_content(message_id='{chosen.get('id', '')}') now."
             )
             return {
-                "messages": [], # Handled via selected_email state
+                "messages": [HumanMessage(content=human_msg)],
                 "selected_email": {
                     "id": chosen.get("id", ""),
                     "threadId": chosen.get("threadId", ""),
@@ -170,7 +169,6 @@ def _last_human_message_text(state: AgentState) -> str:
 
 
 _APPROVAL_TEXTS = {"yes", "y", "ok", "okay", "approve", "approved", "go ahead", "send it", "save"}
-import re
 _APPROVAL_PATTERN = re.compile(r'\b(' + '|'.join([re.escape(x) for x in _APPROVAL_TEXTS]) + r')\b', re.IGNORECASE)
 
 def route_after_orchestrator(state: AgentState) -> str:

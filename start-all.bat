@@ -1,7 +1,7 @@
 @echo off
 echo Starting InboxPilot (React + FastAPI)...
 echo.
-echo Frontend will open at: http://localhost:5173
+echo Frontend will open at: http://localhost:3000
 echo Backend API at: http://localhost:8000
 echo API Docs at:  http://localhost:8000/docs
 echo.

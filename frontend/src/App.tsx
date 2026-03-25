@@ -10,7 +10,7 @@ interface AttachmentPayload {
   content_base64: string
 }
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8081'
+const API_BASE = import.meta.env.VITE_API_URL || ''
 
 export default function App() {
   const [messages, setMessages] = useState<Message[]>([])
@@ -200,7 +200,7 @@ export default function App() {
     )
 
     if (decision === 'no') {
-      void sendMessage('no')
+      void sendMessage('_reject_draft_')
       return
     }
 
@@ -231,7 +231,7 @@ export default function App() {
     }
 
     // 'yes' — encode any attached files and send
-    void sendMessage('yes', attachmentPayload)
+    void sendMessage('_send_draft_', attachmentPayload)
   }
 
   return (
